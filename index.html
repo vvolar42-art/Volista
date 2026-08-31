@@ -1,0 +1,824 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+  <title>Simulador de Vuelo 3D - Continuous Terrain</title>
+
+  <style>
+    * { box-sizing: border-box; touch-action: none; user-select: none; -webkit-user-select: none; }
+    body, html { margin: 0; padding: 0; width: 100%; height: 100%; overflow: hidden; background: #6eb7ff; font-family: sans-serif; }
+    #canvas-container { width: 100%; height: 100%; position: absolute; top: 0; left: 0; z-index: 1; }
+    #ui { position: absolute; top: 0; left: 0; width: 100%; height: 100%; z-index: 10; pointer-events: none; display: flex; flex-direction: column; justify-content: space-between; padding: 10px; }
+    .interactive { pointer-events: auto; }
+    #top-bar { display: flex; justify-content: space-between; align-items: center; width: 100%; }
+    #hud { color: #00ffcc; font-family: monospace; font-size: 12px; background: rgba(0,0,0,0.6); padding: 6px 12px; border-radius: 6px; border: 1px solid #00ffcc; }
+    .btn { background: rgba(255,255,255,0.2); border: 2px solid #fff; color: #fff; padding: 8px 16px; border-radius: 20px; font-weight: bold; font-size: 12px; text-transform: uppercase; backdrop-filter: blur(4px); }
+    .btn:active { background: rgba(255,255,255,0.5); }
+    #controls-container { display: flex; width: 100%; height: calc(100% - 60px); justify-content: space-between; align-items: flex-end; padding-bottom: 10px; }
+    #left-zone, #right-zone { width: 45%; height: 100%; display: flex; align-items: flex-end; }
+    #left-zone { justify-content: flex-start; }
+    #right-zone { justify-content: flex-end; }
+    #joystick-base { width: 130px; height: 130px; background: rgba(255,255,255,0.15); border: 2px solid rgba(255,255,255,0.4); border-radius: 50%; position: relative; display: flex; align-items: center; justify-content: center; backdrop-filter: blur(4px); }
+    #joystick-stick { width: 50px; height: 50px; background: #00ffcc; border-radius: 50%; position: absolute; box-shadow: 0 0 10px #00ffcc; }
+    #throttle-container { width: 70px; height: 220px; background: rgba(0,0,0,0.6); border: 2px solid rgba(255,255,255,0.3); border-radius: 12px; position: relative; display: flex; flex-direction: column; justify-content: space-between; align-items: center; padding: 10px 0; backdrop-filter: blur(4px); }
+    #throttle-track { position: absolute; top: 20px; bottom: 20px; width: 6px; background: rgba(255,255,255,0.2); border-radius: 3px; }
+    #throttle-handle { width: 50px; height: 30px; background: #ff3366; border-radius: 6px; position: absolute; bottom: 20px; left: 10px; box-shadow: 0 0 8px #ff3366; display: flex; align-items: center; justify-content: center; color: white; font-weight: bold; font-size: 10px; }
+    .gear-label { font-size: 9px; color: #fff; z-index: 2; font-family: monospace; }
+  </style>
+
+  <script src="three.min.js"></script>
+</head>
+<body>
+
+  <div id="canvas-container"></div>
+
+  <div id="ui">
+    <div id="top-bar">
+      <div id="hud">ALT: <span id="hud-alt">0</span>m | VEL: <span id="hud-spd">0</span>km/h | GEAR: <span id="hud-gear">N</span></div>
+      <button id="swap-btn" class="btn interactive">Invertir Mandos</button>
+    </div>
+
+    <div id="controls-container">
+      <div id="left-zone" class="interactive">
+        <div id="joystick-base">
+          <div id="joystick-stick"></div>
+        </div>
+      </div>
+      <div id="right-zone" class="interactive">
+        <div id="throttle-container">
+          <div id="throttle-track"></div>
+          <span class="gear-label">7</span>
+          <span class="gear-label">6</span>
+          <span class="gear-label">5</span>
+          <span class="gear-label">4</span>
+          <span class="gear-label">3</span>
+          <span class="gear-label">2</span>
+          <span class="gear-label">1</span>
+          <span class="gear-label">N</span>
+          <span class="gear-label">R</span>
+          <div id="throttle-handle">N</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    const container = document.getElementById('canvas-container');
+    const scene = new THREE.Scene();
+    const skyColor = new THREE.Color(0x6eb7ff);
+    scene.background = skyColor;
+    
+    const FOG_NEAR = 10000;
+    const FOG_FAR = 45000;
+    scene.fog = new THREE.Fog(skyColor, FOG_NEAR, FOG_FAR);
+
+    const camera = new THREE.PerspectiveCamera(60, window.innerWidth / window.innerHeight, 1, 100000);
+
+    const renderer = new THREE.WebGLRenderer({ 
+      antialias: true, 
+      powerPreference: "high-performance",
+      logarithmicDepthBuffer: true 
+    });
+    renderer.setSize(window.innerWidth, window.innerHeight);
+    renderer.setPixelRatio(Math.min(window.devicePixelRatio, 1.5));
+    
+    renderer.shadowMap.enabled = true;
+    renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+    renderer.shadowMap.autoUpdate = true;
+    container.appendChild(renderer.domElement);
+
+    const ambientLight = new THREE.AmbientLight(0xffffff, 0.4);
+    scene.add(ambientLight);
+
+    const dirLight = new THREE.DirectionalLight(0xfffaed, 1.3);
+    dirLight.castShadow = true;
+    
+    dirLight.shadow.mapSize.width = 2048;
+    dirLight.shadow.mapSize.height = 2048;
+    
+    dirLight.shadow.camera.near = 1;
+    dirLight.shadow.camera.far = 80000;
+    
+    const shadowDistance = 25000; 
+    dirLight.shadow.camera.left = -shadowDistance;
+    dirLight.shadow.camera.right = shadowDistance;
+    dirLight.shadow.camera.top = shadowDistance;
+    dirLight.shadow.camera.bottom = -shadowDistance;
+    
+    dirLight.shadow.bias = -0.0001;
+    dirLight.shadow.normalBias = 0.02;
+
+    scene.add(dirLight);
+
+    const sunGroup = new THREE.Group();
+    const sunGeo = new THREE.SphereGeometry(1200, 32, 32);
+    const sunMat = new THREE.MeshBasicMaterial({ color: 0xfffbe8 });
+    const sunMesh = new THREE.Mesh(sunGeo, sunMat);
+    
+    const glowGeo = new THREE.SphereGeometry(2200, 32, 32);
+    const glowMat = new THREE.MeshBasicMaterial({ 
+      color: 0xffddaa, 
+      transparent: true, 
+      opacity: 0.35, 
+      side: THREE.BackSide 
+    });
+    const glowMesh = new THREE.Mesh(glowGeo, glowMat);
+    sunGroup.add(sunMesh);
+    sunGroup.add(glowMesh);
+    scene.add(sunGroup);
+
+    const waterUniforms = { 
+      uTime: { value: 0 },
+      uSunDir: { value: new THREE.Vector3() },
+      uFogNear: { value: FOG_NEAR },
+      uFogFar: { value: FOG_FAR },
+      uFogColor: { value: skyColor }
+    };
+
+    const W_100 = 0.06283185; 
+
+    const SEED_X = Math.random() * 100000;
+    const SEED_Z = Math.random() * 100000;
+
+    function pseudoNoise(x, z) { 
+      const sx = x + SEED_X;
+      const sz = z + SEED_Z;
+
+      const baseLand = -10; 
+      const warpX = Math.sin(sx * 0.00018 + Math.cos(sz * 0.00012)) * 1800;
+      const warpZ = Math.cos(sz * 0.00018 + Math.sin(sx * 0.00012)) * 1800;
+
+      const wx = sx + warpX;
+      const wz = sz + warpZ;
+
+      const densityNoise = (Math.sin(wx * 0.00008) + Math.cos(wz * 0.00008)) * 0.5;
+      let mountainPresence = Math.min(1.0, Math.max(0, (densityNoise - 0.05) * 2.2));
+
+      const nBroad = Math.sin(wx * 0.00035) * Math.cos(wz * 0.00035);
+      const nLow = Math.sin(wx * 0.0005) * Math.cos(wz * 0.0004); 
+      const nMid = Math.sin(wx * 0.0022) * Math.cos(wz * 0.0022);
+      const nDetail = Math.sin(wx * 0.0055) * Math.cos(wz * 0.0055);
+
+      const typeNoise = Math.sin(wx * 0.00015) + Math.cos(wz * 0.00015);
+      let normVal = Math.min(1, Math.max(0, nLow + 0.2) / 1.2);
+      let mountainSpread = 0;
+
+      if (typeNoise > 0.6) {
+        mountainSpread = Math.pow(normVal, 0.65); 
+      } else if (typeNoise < -0.6) {
+        mountainSpread = Math.pow(normVal, 1.1); 
+      } else if (typeNoise > 0.0) {
+        let subPeak = Math.sin(wx * 0.0012) * Math.cos(wz * 0.0012) * 0.25;
+        mountainSpread = Math.min(1.0, Math.max(0, Math.pow(normVal, 0.75) + subPeak));
+      } else {
+        mountainSpread = Math.pow(normVal, 0.85);
+      }
+
+      mountainSpread *= mountainPresence;
+      const plainFactor = Math.max(0.05, Math.pow(Math.max(0, nBroad), 2));
+
+      return baseLand + (mountainSpread * 15000) + (nMid * 400 * plainFactor) + (nLow * 600) + (nDetail * 30 * plainFactor);
+    }
+
+    function getNormalAt(x, z) {
+      const delta = 1.0;
+      const hL = pseudoNoise(x - delta, z);
+      const hR = pseudoNoise(x + delta, z);
+      const hD = pseudoNoise(x, z - delta);
+      const hU = pseudoNoise(x, z + delta);
+
+      const normal = new THREE.Vector3(hL - hR, 2.0 * delta, hD - hU);
+      return normal.normalize();
+    }
+
+    // SHADER DE AGUA ROBUSTO Y TOTALMENTE COMPATIBLE CON WEBGL / LOGARITHMIC DEPTH
+    const waterMaterial = new THREE.ShaderMaterial({
+      uniforms: waterUniforms,
+      vertexShader: `
+        uniform float uTime;
+        varying vec3 vWorldPosition;
+        varying vec3 vWaveNormal;
+        varying float vWaveHeight;
+
+        void main() {
+          vec3 pos = position;
+          vec4 worldPos = modelMatrix * vec4(pos, 1.0);
+
+          float wave1 = sin((worldPos.x * 0.008 + worldPos.z * 0.006) + uTime * 1.5) * 3.5;
+          float wave2 = cos((-worldPos.x * 0.007 + worldPos.z * 0.007) - uTime * 1.8) * 2.0;
+          float h = wave1 + wave2;
+
+          worldPos.y += h;
+          vWorldPosition = worldPos.xyz;
+          vWaveHeight = h;
+
+          vWaveNormal = normalize(vec3(-wave1 * 0.05, 1.0, -wave2 * 0.05));
+
+          gl_Position = projectionMatrix * viewMatrix * worldPos;
+        }
+      `,
+      fragmentShader: `
+        uniform float uTime;
+        uniform vec3 uSunDir;
+        uniform float uFogNear;
+        uniform float uFogFar;
+        uniform vec3 uFogColor;
+
+        varying vec3 vWorldPosition;
+        varying vec3 vWaveNormal;
+        varying float vWaveHeight;
+
+        void main() {
+          vec3 deepWater = vec3(0.01, 0.12, 0.28);
+          vec3 shallowWater = vec3(0.06, 0.35, 0.55);
+
+          vec3 viewDir = normalize(cameraPosition - vWorldPosition);
+          float dist = length(cameraPosition - vWorldPosition);
+
+          vec3 normal = normalize(vWaveNormal);
+          float fresnel = pow(1.0 - max(dot(viewDir, normal), 0.0), 3.0);
+          fresnel = clamp(fresnel, 0.15, 0.6);
+
+          vec3 baseColor = mix(deepWater, shallowWater, (vWaveHeight + 5.0) / 10.0);
+          vec3 finalColor = mix(baseColor, uFogColor, fresnel);
+
+          vec3 halfVector = normalize(uSunDir + viewDir);
+          float NdotH = max(dot(normal, halfVector), 0.0);
+          float specular = pow(NdotH, 90.0);
+          
+          finalColor += vec3(1.0, 0.98, 0.9) * specular * 1.8;
+
+          float foam = smoothstep(3.5, 5.0, vWaveHeight);
+          finalColor = mix(finalColor, vec3(0.95, 0.98, 1.0), foam * 0.4);
+
+          float fogFactor = smoothstep(uFogNear, uFogFar, dist);
+          finalColor = mix(finalColor, uFogColor, clamp(fogFactor, 0.0, 1.0));
+
+          gl_FragColor = vec4(finalColor, 1.0);
+        }
+      `,
+      side: THREE.DoubleSide,
+      depthWrite: true
+    });
+
+    const WATER_LEVEL = 70;
+
+    function getWaterWaveHeight(x, z, t) {
+      const y1 = Math.sin((x * 0.008 + z * 0.006) + t * 1.5) * 3.5;
+      const y2 = Math.cos((-x * 0.007 + z * 0.007) - t * 1.8) * 2.0;
+      return WATER_LEVEL + y1 + y2;
+    }
+
+    const SHARED_GEOS = {
+      tree: new THREE.ConeGeometry(5, 18, 4),
+      rock: new THREE.DodecahedronGeometry(8),
+      snow: new THREE.ConeGeometry(25, 20, 4),
+      runway: new THREE.PlaneGeometry(60, 500),
+      tower: new THREE.CylinderGeometry(4, 6, 50, 8),
+      cloud: new THREE.DodecahedronGeometry(1800)
+    };
+    SHARED_GEOS.runway.rotateX(-Math.PI / 2);
+
+    const invisibleMat = new THREE.MeshBasicMaterial({ colorWrite: false, depthWrite: false });
+    const sharedDepthMaterial = new THREE.MeshDepthMaterial({ depthPacking: THREE.RGBADepthPacking });
+
+    const SHARED_MATS = {
+      terrain: new THREE.MeshStandardMaterial({ 
+        color: 0x2e6f40, 
+        roughness: 0.85,
+        metalness: 0.1,
+        flatShading: true,
+        polygonOffset: true,
+        polygonOffsetFactor: 1,
+        polygonOffsetUnits: 1
+      }),
+      tree: new THREE.MeshStandardMaterial({ color: 0x184725 }),
+      rock: new THREE.MeshStandardMaterial({ color: 0x777777, flatShading: true }),
+      snow: new THREE.MeshStandardMaterial({ color: 0xffffff, flatShading: true }),
+      runway: new THREE.MeshStandardMaterial({ 
+        color: 0x222222,
+        polygonOffset: true,
+        polygonOffsetFactor: -1,
+        polygonOffsetUnits: -1
+      }),
+      tower: new THREE.MeshStandardMaterial({ color: 0xcccccc }),
+      cloud: new THREE.MeshStandardMaterial({ color: 0xffffff, transparent: true, opacity: 0.85, flatShading: true }),
+      water: waterMaterial
+    };
+
+    const planeGroup = new THREE.Group();
+    const bodyGeo = new THREE.ConeGeometry(1.2, 8, 8);
+    bodyGeo.rotateX(Math.PI / 2);
+    const bodyMat = new THREE.MeshStandardMaterial({ color: 0xd9381e });
+    const body = new THREE.Mesh(bodyGeo, bodyMat);
+    body.castShadow = true;
+    body.receiveShadow = true;
+    planeGroup.add(body);
+
+    const wingGeo = new THREE.BoxGeometry(10, 0.1, 2);
+    const wingMat = new THREE.MeshStandardMaterial({ color: 0xeeeeee });
+    const wings = new THREE.Mesh(wingGeo, wingMat);
+    wings.position.set(0, 0, 0.5);
+    wings.castShadow = true;
+    wings.receiveShadow = true;
+    planeGroup.add(wings);
+
+    const tailGeo = new THREE.BoxGeometry(0.1, 1.8, 1.2);
+    const tail = new THREE.Mesh(tailGeo, wingMat);
+    tail.position.set(0, 1, -3.2);
+    tail.castShadow = true;
+    tail.receiveShadow = true;
+    planeGroup.add(tail);
+
+    const propGeo = new THREE.BoxGeometry(2.4, 0.2, 0.05);
+    const propMat = new THREE.MeshStandardMaterial({ color: 0x111111 });
+    const propeller = new THREE.Mesh(propGeo, propMat);
+    propeller.position.set(0, 0, 4.1);
+    propeller.castShadow = true;
+    propeller.receiveShadow = true;
+    planeGroup.add(propeller);
+    scene.add(planeGroup);
+
+    const CHUNK_SIZE = 1200;
+    const TERRAIN_SEGMENTS = 16;
+    const RENDER_DISTANCE = 24; 
+    const CLOUD_RENDER_DISTANCE = 36;
+
+    const chunks = new Map();
+    const activeCloudPositions = [];
+
+    const WATER_SIZE = 200000;
+    const globalWaterGeo = new THREE.PlaneGeometry(WATER_SIZE, WATER_SIZE, 64, 64);
+    globalWaterGeo.rotateX(-Math.PI / 2);
+    const globalWater = new THREE.Mesh(globalWaterGeo, SHARED_MATS.water);
+    globalWater.position.y = WATER_LEVEL;
+    globalWater.receiveShadow = true;
+    globalWater.frustumCulled = false;
+    scene.add(globalWater);
+
+    const dummyMatrix = new THREE.Matrix4();
+    
+    const playerFrustum = new THREE.Frustum();
+    const sunFrustum = new THREE.Frustum();
+    
+    const cameraMatrix = new THREE.Matrix4();
+    const sunMatrix = new THREE.Matrix4();
+
+    function getDeterministicRandom(x, z) {
+      const dot = (x + SEED_X) * 12.9898 + (z + SEED_Z) * 78.233;
+      const sinVal = Math.sin(dot) * 43758.5453123;
+      return sinVal - Math.floor(sinVal);
+    }
+
+    function createChunk(cx, cz) {
+      const group = new THREE.Group();
+      const seed = getDeterministicRandom(cx, cz);
+
+      const terrainGeo = new THREE.PlaneGeometry(
+        CHUNK_SIZE, 
+        CHUNK_SIZE, 
+        TERRAIN_SEGMENTS, 
+        TERRAIN_SEGMENTS
+      );
+      terrainGeo.rotateX(-Math.PI / 2);
+
+      const posAttribute = terrainGeo.attributes.position;
+      const normAttribute = terrainGeo.attributes.normal;
+      
+      const worldX = cx * CHUNK_SIZE;
+      const worldZ = cz * CHUNK_SIZE;
+
+      let minY = Infinity;
+      let maxY = -Infinity;
+
+      for (let i = 0; i < posAttribute.count; i++) {
+        const vx = posAttribute.getX(i);
+        const vz = posAttribute.getZ(i);
+        
+        const absX = worldX + vx;
+        const absZ = worldZ + vz;
+        
+        const vy = pseudoNoise(absX, absZ);
+        posAttribute.setY(i, vy);
+        
+        const norm = getNormalAt(absX, absZ);
+        normAttribute.setXYZ(i, norm.x, norm.y, norm.z);
+
+        if (vy < minY) minY = vy;
+        if (vy > maxY) maxY = vy;
+      }
+      
+      terrainGeo.computeBoundingBox();
+      terrainGeo.computeBoundingSphere();
+
+      const terrainMesh = new THREE.Mesh(terrainGeo, SHARED_MATS.terrain);
+      terrainMesh.receiveShadow = true;
+      terrainMesh.castShadow = true;
+      terrainMesh.frustumCulled = false; 
+      terrainMesh.customDepthMaterial = sharedDepthMaterial;
+      terrainMesh.userData = { originalMaterial: SHARED_MATS.terrain };
+      group.add(terrainMesh);
+
+      if (Math.floor(seed * 10000) % 73 === 0) {
+        const runway = new THREE.Mesh(SHARED_GEOS.runway, SHARED_MATS.runway);
+        const rY = pseudoNoise(worldX, worldZ) + 2;
+        runway.position.set(0, rY, 0);
+        runway.frustumCulled = false;
+        runway.userData = { originalMaterial: SHARED_MATS.runway };
+        group.add(runway);
+
+        const tower = new THREE.Mesh(SHARED_GEOS.tower, SHARED_MATS.tower);
+        tower.position.set(45, rY + 24, 0);
+        tower.castShadow = true;
+        tower.frustumCulled = false;
+        tower.customDepthMaterial = sharedDepthMaterial;
+        tower.userData = { originalMaterial: SHARED_MATS.tower };
+        group.add(tower);
+      } 
+      
+      const trees = [], rocks = [], snows = [];
+
+      for (let i = 0; i < 4; i++) {
+        const tx = (getDeterministicRandom(cx + i, cz - i) - 0.5) * CHUNK_SIZE;
+        const tz = (getDeterministicRandom(cx - i, cz + i) - 0.5) * CHUNK_SIZE;
+        const ty = pseudoNoise(tx + worldX, tz + worldZ);
+
+        if (ty > WATER_LEVEL + 5 && ty < 1200) { 
+          if (getDeterministicRandom(tx, tz) > 0.3) {
+            trees.push({ x: tx, y: ty + 9, z: tz });
+          } else {
+            rocks.push({ x: tx, y: ty + 4, z: tz });
+          }
+        } else if (ty >= 2000) { 
+          snows.push({ x: tx, y: ty + 10, z: tz });
+        }
+      }
+
+      if (trees.length > 0) {
+        const instTrees = new THREE.InstancedMesh(SHARED_GEOS.tree, SHARED_MATS.tree, trees.length);
+        trees.forEach((t, i) => {
+          dummyMatrix.setPosition(t.x, t.y, t.z);
+          instTrees.setMatrixAt(i, dummyMatrix);
+        });
+        instTrees.instanceMatrix.needsUpdate = true;
+        instTrees.castShadow = true;
+        instTrees.receiveShadow = true;
+        instTrees.frustumCulled = false;
+        instTrees.customDepthMaterial = sharedDepthMaterial;
+        instTrees.userData = { originalMaterial: SHARED_MATS.tree };
+        group.add(instTrees);
+      }
+
+      if (rocks.length > 0) {
+        const instRocks = new THREE.InstancedMesh(SHARED_GEOS.rock, SHARED_MATS.rock, rocks.length);
+        rocks.forEach((r, i) => {
+          dummyMatrix.setPosition(r.x, r.y, r.z);
+          instRocks.setMatrixAt(i, dummyMatrix);
+        });
+        instRocks.instanceMatrix.needsUpdate = true;
+        instRocks.castShadow = true;
+        instRocks.receiveShadow = true;
+        instRocks.frustumCulled = false;
+        instRocks.customDepthMaterial = sharedDepthMaterial;
+        instRocks.userData = { originalMaterial: SHARED_MATS.rock };
+        group.add(instRocks);
+      }
+
+      if (snows.length > 0) {
+        const instSnows = new THREE.InstancedMesh(SHARED_GEOS.snow, SHARED_MATS.snow, snows.length);
+        snows.forEach((s, i) => {
+          dummyMatrix.setPosition(s.x, s.y, s.z);
+          instSnows.setMatrixAt(i, dummyMatrix);
+        });
+        instSnows.instanceMatrix.needsUpdate = true;
+        instSnows.castShadow = true;
+        instSnows.receiveShadow = true;
+        instSnows.frustumCulled = false;
+        instSnows.customDepthMaterial = sharedDepthMaterial;
+        instSnows.userData = { originalMaterial: SHARED_MATS.snow };
+        group.add(instSnows);
+      }
+
+      if (seed > 0.985) {
+        const cloudX = worldX + (getDeterministicRandom(cz, cx) - 0.5) * CHUNK_SIZE;
+        const cloudZ = worldZ + (getDeterministicRandom(cx, cz) - 0.5) * CHUNK_SIZE;
+        
+        let tooClose = false;
+        for (let p of activeCloudPositions) {
+          const distSq = (p.x - cloudX) ** 2 + (p.z - cloudZ) ** 2;
+          if (distSq < 3200 * 3200) {
+            tooClose = true;
+            break;
+          }
+        }
+
+        if (!tooClose) {
+          const cloud = new THREE.Mesh(SHARED_GEOS.cloud, SHARED_MATS.cloud);
+          const cloudY = 5500 + getDeterministicRandom(cx + 1, cz + 1) * 2500;
+          cloud.position.set(cloudX - worldX, cloudY, cloudZ - worldZ);
+          cloud.frustumCulled = false;
+          cloud.userData = { isCloud: true, originalMaterial: SHARED_MATS.cloud };
+          group.add(cloud);
+          activeCloudPositions.push({ x: cloudX, z: cloudZ, key: `${cx},${cz}` });
+          if (cloudY + 1800 > maxY) maxY = cloudY + 1800;
+        }
+      }
+
+      group.position.set(worldX, 0, worldZ);
+      
+      const centerY = (minY + maxY) / 2;
+      const heightHalf = Math.max((maxY - minY) / 2, CHUNK_SIZE / 2);
+      const halfDiagonal = Math.sqrt((CHUNK_SIZE / 2) ** 2 + (CHUNK_SIZE / 2) ** 2 + heightHalf ** 2) + 2000;
+      group.boundingSphere = new THREE.Sphere(new THREE.Vector3(worldX, centerY, worldZ), halfDiagonal);
+
+      scene.add(group);
+      return group;
+    }
+
+    function preloadWorld() {
+      const pX = Math.floor(planeGroup.position.x / CHUNK_SIZE);
+      const pZ = Math.floor(planeGroup.position.z / CHUNK_SIZE);
+
+      for (let x = -CLOUD_RENDER_DISTANCE; x <= CLOUD_RENDER_DISTANCE; x++) {
+        for (let z = -CLOUD_RENDER_DISTANCE; z <= CLOUD_RENDER_DISTANCE; z++) {
+          const key = `${pX + x},${pZ + z}`;
+          if (!chunks.has(key)) {
+            const chunkGroup = createChunk(pX + x, pZ + z);
+            if (chunkGroup) {
+              chunks.set(key, chunkGroup);
+            }
+          }
+        }
+      }
+    }
+
+    function updateTerrain() {
+      const pX = Math.floor(planeGroup.position.x / CHUNK_SIZE);
+      const pZ = Math.floor(planeGroup.position.z / CHUNK_SIZE);
+
+      let createdThisFrame = 0;
+      const MAX_CREATIONS_PER_FRAME = 2;
+
+      camera.updateMatrixWorld(true);
+      dirLight.shadow.camera.updateMatrixWorld(true);
+
+      cameraMatrix.multiplyMatrices(camera.projectionMatrix, camera.matrixWorldInverse);
+      playerFrustum.setFromProjectionMatrix(cameraMatrix);
+
+      sunMatrix.multiplyMatrices(dirLight.shadow.camera.projectionMatrix, dirLight.shadow.camera.matrixWorldInverse);
+      sunFrustum.setFromProjectionMatrix(sunMatrix);
+
+      for (let r = 0; r <= CLOUD_RENDER_DISTANCE; r++) {
+        for (let x = -r; x <= r; x++) {
+          for (let z = -r; z <= r; z++) {
+            if (Math.abs(x) !== r && Math.abs(z) !== r) continue;
+            
+            const key = `${pX + x},${pZ + z}`;
+            if (!chunks.has(key)) {
+              const chunkGroup = createChunk(pX + x, pZ + z);
+              if (chunkGroup) {
+                chunks.set(key, chunkGroup);
+                createdThisFrame++;
+              }
+              if (createdThisFrame >= MAX_CREATIONS_PER_FRAME) break;
+            }
+          }
+          if (createdThisFrame >= MAX_CREATIONS_PER_FRAME) break;
+        }
+        if (createdThisFrame >= MAX_CREATIONS_PER_FRAME) break;
+      }
+
+      for (const [key, chunkGroup] of chunks.entries()) {
+        const [cX, cZ] = key.split(',').map(Number);
+        const distX = Math.abs(cX - pX);
+        const distZ = Math.abs(cZ - pZ);
+
+        if (distX > CLOUD_RENDER_DISTANCE + 2 || distZ > CLOUD_RENDER_DISTANCE + 2) {
+          scene.remove(chunkGroup);
+          
+          chunkGroup.traverse((child) => {
+            if (child.geometry) child.geometry.dispose();
+          });
+
+          chunks.delete(key);
+
+          const cloudIdx = activeCloudPositions.findIndex(p => p.key === key);
+          if (cloudIdx !== -1) activeCloudPositions.splice(cloudIdx, 1);
+        } else {
+          const isTerrainInDistance = distX <= RENDER_DISTANCE && distZ <= RENDER_DISTANCE;
+          const sphere = chunkGroup.boundingSphere;
+
+          const visibleToPlayer = playerFrustum.intersectsSphere(sphere);
+          const visibleToShadow = sunFrustum.intersectsSphere(sphere);
+
+          if (isTerrainInDistance) {
+            if (visibleToPlayer) {
+              chunkGroup.visible = true;
+              chunkGroup.children.forEach(child => {
+                child.visible = true;
+                if (child.userData.originalMaterial) {
+                  child.material = child.userData.originalMaterial;
+                }
+              });
+            } else if (visibleToShadow) {
+              chunkGroup.visible = true;
+              chunkGroup.children.forEach(child => {
+                if (child.userData.isCloud) {
+                  child.visible = false;
+                } else {
+                  child.visible = true;
+                  child.material = invisibleMat;
+                }
+              });
+            } else {
+              chunkGroup.visible = false;
+            }
+          } else {
+            chunkGroup.visible = false;
+          }
+        }
+      }
+    }
+
+    let joyTouchId = null;
+    let throttleTouchId = null;
+    let joystickInput = { x: 0, y: 0 };
+    let controlsSwapped = false;
+
+    const physics = { speed: 0, gearRatio: 0, currentGear: 'N', gears: { 'R': -15, 'N': 0, '1': 20, '2': 40, '3': 60, '4': 90, '5': 120, '6': 210, '7': 499.5 } };
+    
+    planeGroup.position.set(0, 3500, 0);
+
+    const joyBase = document.getElementById('joystick-base');
+    const joyStick = document.getElementById('joystick-stick');
+    const throttleContainer = document.getElementById('throttle-container');
+    const throttleHandle = document.getElementById('throttle-handle');
+    const leftZone = document.getElementById('left-zone');
+    const rightZone = document.getElementById('right-zone');
+
+    document.getElementById('swap-btn').addEventListener('click', () => {
+      controlsSwapped = !controlsSwapped;
+      if (controlsSwapped) { leftZone.appendChild(throttleContainer); rightZone.appendChild(joyBase); }
+      else { leftZone.appendChild(joyBase); rightZone.appendChild(throttleContainer); }
+    });
+
+    joyBase.addEventListener('touchstart', e => { joyTouchId = e.changedTouches[0].identifier; updateJoystick(e.changedTouches[0]); }, { passive: true });
+    
+    window.addEventListener('touchmove', e => {
+      for (let t of e.changedTouches) {
+        if (t.identifier === joyTouchId) updateJoystick(t);
+        if (t.identifier === throttleTouchId) updateThrottle(t);
+      }
+    }, { passive: true });
+
+    const resetJoy = () => { joystickInput = { x: 0, y: 0 }; joyStick.style.transform = `translate(0px, 0px)`; };
+    
+    window.addEventListener('touchend', e => {
+      for (let t of e.changedTouches) {
+        if (t.identifier === joyTouchId) { joyTouchId = null; resetJoy(); }
+        if (t.identifier === throttleTouchId) throttleTouchId = null;
+      }
+    });
+
+    function updateJoystick(touch) {
+      const rect = joyBase.getBoundingClientRect();
+      const centerX = rect.left + rect.width / 2;
+      const centerY = rect.top + rect.height / 2;
+      let dx = touch.clientX - centerX;
+      let dy = touch.clientY - centerY;
+      const dist = Math.min(Math.hypot(dx, dy), 50);
+      const angle = Math.atan2(dy, dx);
+      dx = Math.cos(angle) * dist;
+      dy = Math.sin(angle) * dist;
+      joyStick.style.transform = `translate(${dx}px, ${dy}px)`;
+      
+      joystickInput.x = -dx / 50; 
+      joystickInput.y = dy / 50; 
+    }
+
+    const gearKeys = ['R', 'N', '1', '2', '3', '4', '5', '6', '7'];
+    throttleContainer.addEventListener('touchstart', e => { throttleTouchId = e.changedTouches[0].identifier; updateThrottle(e.changedTouches[0]); }, { passive: true });
+
+    function updateThrottle(touch) {
+      const rect = throttleContainer.getBoundingClientRect();
+      let relY = (touch.clientY - rect.top) / rect.height;
+      relY = Math.max(0, Math.min(1, relY));
+      const idx = 8 - Math.floor(relY * 9);
+      const gear = gearKeys[Math.min(8, Math.max(0, idx))];
+      physics.currentGear = gear;
+      throttleHandle.innerText = gear;
+      throttleHandle.style.bottom = `${(relY * -1 + 1) * 80 + 5}%`;
+      physics.gearRatio = physics.gears[gear];
+      document.getElementById('hud-gear').innerText = gear;
+    }
+
+    function getGroundHeight(x, z, t) {
+      let terrainH = pseudoNoise(x, z);
+      let waterH = getWaterWaveHeight(x, z, t);
+      return Math.max(terrainH, waterH);
+    }
+
+    const clock = new THREE.Clock();
+
+    const _forwardDir = new THREE.Vector3();
+    const _camOffset = new THREE.Vector3();
+    const _camTarget = new THREE.Vector3();
+    const _lookAhead = new THREE.Vector3(0, 1, 5);
+
+    function animate() {
+      requestAnimationFrame(animate);
+
+      const delta = Math.min(clock.getDelta(), 0.05);
+      
+      waterUniforms.uTime.value += delta;
+
+      _forwardDir.set(0, 0, 1).applyQuaternion(planeGroup.quaternion);
+      const pitchSin = _forwardDir.y;
+
+      if (physics.currentGear === 'N') {
+        const dragFactor = 4.0;
+        physics.speed -= physics.speed * dragFactor * 0.05 * delta;
+        physics.speed -= pitchSin * 45 * delta;
+      } else {
+        const targetSpeed = physics.gearRatio;
+        physics.speed += (targetSpeed - physics.speed) * Math.min(delta * 1.5, 1.0);
+      }
+
+      const absSpeed = Math.abs(physics.speed);
+      const controlEffect = Math.min(absSpeed / 35, 0.85);
+
+      planeGroup.rotateX(-joystickInput.y * controlEffect * delta * 1.2);
+      planeGroup.rotateZ(-joystickInput.x * controlEffect * delta * 4.5);
+      
+      const yawDirection = physics.speed >= 0 ? 1 : -1;
+      planeGroup.rotateY(-joystickInput.x * 0.6 * controlEffect * delta * yawDirection); 
+
+      planeGroup.translateZ(physics.speed * delta);
+
+      const currentPos = planeGroup.position;
+      
+      globalWater.position.x = currentPos.x;
+      globalWater.position.z = currentPos.z;
+      
+      const terrainHeight = getGroundHeight(currentPos.x, currentPos.z, waterUniforms.uTime.value);
+      const minAltitude = terrainHeight + 1.2;
+
+      const minFlightSpeed = 20;
+      if (absSpeed < minFlightSpeed && currentPos.y > minAltitude) {
+        const fallRate = (1 - absSpeed / minFlightSpeed) * 9.8;
+        planeGroup.position.y -= fallRate * delta;
+      }
+
+      if (currentPos.y <= minAltitude) {
+        currentPos.y = minAltitude;
+        planeGroup.rotation.z *= 0.8;
+        if (planeGroup.rotation.x < 0) planeGroup.rotation.x *= 0.8;
+      }
+
+      const propSpeedMultiplier = physics.currentGear === 'N' ? 0.2 : 0.5;
+      propeller.rotation.z += (physics.speed !== 0 ? physics.speed : 1) * delta * propSpeedMultiplier;
+
+      const shadowTexelSize = 10;
+      const snapX = Math.floor(planeGroup.position.x / shadowTexelSize) * shadowTexelSize;
+      const snapZ = Math.floor(planeGroup.position.z / shadowTexelSize) * shadowTexelSize;
+
+      dirLight.position.set(snapX + 20000, 40000, snapZ + 20000);
+      dirLight.target.position.set(snapX, 0, snapZ);
+      dirLight.target.updateMatrixWorld(true);
+
+      dirLight.shadow.camera.position.copy(dirLight.position);
+      dirLight.shadow.camera.lookAt(dirLight.target.position);
+      dirLight.shadow.camera.updateMatrixWorld(true);
+      dirLight.shadow.camera.updateProjectionMatrix();
+
+      sunGroup.position.copy(dirLight.position);
+      waterUniforms.uSunDir.value.copy(dirLight.position).normalize();
+
+      _camOffset.set(0, 5, -18).applyQuaternion(planeGroup.quaternion);
+      _camTarget.copy(planeGroup.position).add(_camOffset);
+      camera.position.lerp(_camTarget, 0.1);
+
+      _camTarget.copy(planeGroup.position).add(_lookAhead.clone().applyQuaternion(planeGroup.quaternion));
+      camera.lookAt(_camTarget);
+
+      updateTerrain();
+
+      const relativeAlt = Math.max(0, Math.round(planeGroup.position.y - WATER_LEVEL - 1.2));
+      document.getElementById('hud-alt').innerText = relativeAlt;
+      document.getElementById('hud-spd').innerText = Math.round(physics.speed * 2);
+
+      renderer.render(scene, camera);
+    }
+
+    window.addEventListener('resize', () => { 
+      camera.aspect = window.innerWidth / window.innerHeight; 
+      camera.updateProjectionMatrix(); 
+      renderer.setSize(window.innerWidth, window.innerHeight); 
+    });
+
+    preloadWorld();
+    animate();
+  </script>
+</body>
+</html>
